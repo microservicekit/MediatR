@@ -4,6 +4,7 @@ namespace MediatR
     using System;
     using System.Collections.Concurrent;
     using System.Collections.Generic;
+    using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -40,6 +41,31 @@ namespace MediatR
             return handler.Handle(request, cancellationToken, _serviceFactory);
         }
 
+        public Task<object> Send(object request, CancellationToken cancellationToken = default)
+        {
+            if (request == null)
+            {
+                throw new ArgumentNullException(nameof(request));
+            }
+            var requestType = request.GetType();
+            var requestInterfaceType = requestType
+                .GetInterfaces()
+                .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IRequest<>));
+            var isValidRequest = requestInterfaceType != null;
+
+            if (!isValidRequest)
+            {
+                throw new ArgumentException($"{nameof(request)} does not implement ${nameof(IRequest)}");
+            }
+
+            var responseType = requestInterfaceType.GetGenericArguments()[0];
+            var handler = _requestHandlers.GetOrAdd(requestType,
+                t => Activator.CreateInstance(typeof(RequestHandlerWrapperImpl<,>).MakeGenericType(requestType, responseType)));
+
+            // call via dynamic dispatch to avoid calling through reflection for performance reasons
+            return ((RequestHandlerBase) handler).Handle(request, cancellationToken, _serviceFactory);
+        }
+
         public Task Publish<TNotification>(TNotification notification, CancellationToken cancellationToken = default)
              where TNotification : INotification
         {
@@ -69,12 +95,14 @@ namespace MediatR
         /// Override in a derived class to control how the tasks are awaited. By default the implementation is a foreach and await of each handler
         /// </summary>
         /// <param name="allHandlers">Enumerable of tasks representing invoking each notification handler</param>
+        /// <param name="notification">The notification being published</param>
+        /// <param name="cancellationToken">The cancellation token</param>
         /// <returns>A task representing invoking all handlers</returns>
-        protected virtual async Task PublishCore(IEnumerable<Func<Task>> allHandlers)
+        protected virtual async Task PublishCore(IEnumerable<Func<INotification, CancellationToken, Task>> allHandlers, INotification notification, CancellationToken cancellationToken)
         {
             foreach (var handler in allHandlers)
             {
-                await handler().ConfigureAwait(false);
+                await handler(notification, cancellationToken).ConfigureAwait(false);
             }
         }
 
